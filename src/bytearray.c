@@ -85,6 +85,7 @@ bool bytearray_wrap_buffer(BYTEARRAY *ba, uint8_t *buff, uint32_t length) {
   ba->total = length;
   ba->offset = 0;
   ba->buflen = length;
+  ba->reading = true;
   ba->wrapbuffer = true;
 
   return true;
@@ -104,7 +105,6 @@ size_t bytearray_read_available(BYTEARRAY *ba) {
   if (ba == NULL || ba->buffer == NULL || !ba->reading) {
     return 0;
   }
-
   return ba->total - ba->offset;
 }
 
@@ -123,7 +123,6 @@ bool bytearray_write_ready(BYTEARRAY *ba) {
   }
   if (ba->offset > 0) {
     size_t unreadleft = ba->total - ba->offset;
-    int i = 0;
     uint8_t *buf = ba->buffer;
 
     memmove(buf, buf + ba->offset, unreadleft);
@@ -199,7 +198,9 @@ bool bytearray_readbuffer(BYTEARRAY *ba, void *buff, uint32_t length) {
   if (ba->total - ba->offset < length) {
     return false;
   }
-  memcpy(buff, ba->buffer + ba->offset, length);
+  if (buff) {
+    memcpy(buff, ba->buffer + ba->offset, length);
+  }
   ba->offset += length;
 
   return true;

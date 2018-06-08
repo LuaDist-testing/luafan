@@ -9,7 +9,18 @@ function apt_mt:send(buf)
     return nil
   end
 
-  self.conn:send(buf)
+  if self.send_running then
+    table.insert(self._sender_queue, (coroutine.running()))
+    coroutine.yield()
+  end
+
+  if self.simulate_send_block then
+    self.send_running = coroutine.running()
+    self.conn:send(buf)
+    coroutine.yield()
+  else
+    self.conn:send(buf)
+  end
 
   return #(buf)
 end
@@ -27,6 +38,20 @@ function apt_mt:receive(expect)
     self.receiving_expect = expect
     self.receiving = coroutine.running()
     return coroutine.yield()
+  end
+end
+
+function apt_mt:_onsendready()
+  if self.send_running then
+    local send_running = self.send_running
+    self.send_running = nil
+    if #(self._sender_queue) > 0 then
+      local running = table.remove(self._sender_queue, 1)
+      assert(coroutine.resume(running))
+    end
+    assert(coroutine.resume(send_running, true))
+  else
+    return
   end
 end
 
@@ -60,7 +85,7 @@ function apt_mt:close()
 end
 
 local function connect(host, port, path)
-  local t = {_readstream = stream.new()}
+  local t = {_readstream = stream.new(), _sender_queue = {}, simulate_send_block = true}
   t.conn = tcpd.connect{
     host = host,
     port = port,
@@ -70,6 +95,9 @@ local function connect(host, port, path)
       t._readstream:prepare_get()
 
       t:_onread(t._readstream)
+    end,
+    onsendready = function()
+      t:_onsendready()
     end,
     ondisconnected = function(msg)
       print("client ondisconnected", msg)
@@ -87,7 +115,7 @@ local function bind(host, port, path)
     host = host,
     port = port,
     onaccept = function(apt)
-      local t = {conn = apt, _readstream = stream.new()}
+      local t = {conn = apt, _readstream = stream.new(), _sender_queue = {}, simulate_send_block = true}
       setmetatable(t, apt_mt)
 
       apt:bind{
@@ -99,6 +127,9 @@ local function bind(host, port, path)
           if not t:_onread(t._readstream) and t.onread then
             t.onread(t._readstream)
           end
+        end,
+        onsendready = function()
+          t:_onsendready()
         end,
         ondisconnected = function(msg)
           print("client ondisconnected", msg)

@@ -1,7 +1,9 @@
 local fan = require "fan"
 local pool = require "fan.pool"
-local objectbuf = require "cjson" --require "fan.objectbuf"
+local config = require "config"
+local objectbuf = config.worker_using_cjson and require "cjson" or require "fan.objectbuf"
 local connector = require "fan.connector"
+local stream = require "fan.stream"
 require "compat53"
 
 local function maxn(t)
@@ -24,12 +26,25 @@ function loadbalance_mt.new(max_job_count)
   return obj
 end
 
+function loadbalance_mt:_assign(slave)
+  if self.yielding.head then
+    local co = self.yielding.head.value
+    self.yielding.head = self.yielding.head.next
+    local st,msg = coroutine.resume(co, slave)
+    if not st then
+      print(msg)
+    end
+  end
+end
+
 function loadbalance_mt:add(slave)
   table.insert(self.slaves, slave)
+
+  self:_assign(slave)
 end
 
 local function compare_slave_jobcount(a, b)
-  return a.jobcount < b.jobcount
+  return a.max_job_count - a.jobcount > b.max_job_count - b.jobcount
 end
 
 function loadbalance_mt:findbest()
@@ -52,22 +67,13 @@ end
 
 function loadbalance_mt:telldone(slave)
   slave.jobcount = slave.jobcount - 1
-
-  if self.yielding.head then
-    local co = self.yielding.head.value
-    self.yielding.head = self.yielding.head.next
-    local st,msg = coroutine.resume(co, slave)
-    if not st then
-      print(msg)
-    end
-  end
+  self:_assign(slave)
 end
 
 local master_mt = {}
 master_mt.__index = function(obj, k)
   if obj.func_names[k] then
     return function(obj, ...)
-      -- local slave = obj.slave_pool:pop()
       local slave = obj.loadbalance:findbest()
 
       local task_key = string.format("%d", slave.task_index)
@@ -83,19 +89,28 @@ master_mt.__index = function(obj, k)
         return
       end
 
-      slave.task_map[task_key] = coroutine.running()
-      return coroutine.yield()
+      -- slave resume maybe faster than master's salve:send resume
+      if slave.task_map[task_key] then
+        local args = slave.task_map[task_key]
+        slave.task_map[task_key] = nil
+        return table.unpack(args)
+      else
+        slave.task_map[task_key] = coroutine.running()
+        return coroutine.yield()
+      end
     end
   end
 end
 
 local function new(funcmap, slavecount, max_job_count, url)
+  local samehost = false
   if not url then
     local fifoname = connector.tmpfifoname()
     url = "fifo:" .. fifoname
+    samehost = true
   end
 
-  local master = false
+  local master = slavecount == 0
   local slave_pids = {}
   local slave_index
   local master_pid = fan.getpid()
@@ -122,6 +137,10 @@ local function new(funcmap, slavecount, max_job_count, url)
   end
 
   if master then
+    if not samehost and slavecount > 0 then
+      error("master/slave within one script not allowed.")
+      return
+    end
     if cpu_count > 1 then
       fan.setaffinity(2 ^ (cpu_count - 1))
     end
@@ -150,29 +169,7 @@ local function new(funcmap, slavecount, max_job_count, url)
       apt.task_index = 1
       apt.jobcount = 0
       apt.status = "running"
-
-      apt.onread = function(input)
-        -- print("onread master", input:available())
-        while input:available() > 0 do
-          local str = input:GetString()
-          if not str then
-            break
-          end
-          -- print("onread master", #(str))
-          local args = objectbuf.decode(str)
-
-          if apt.task_map[args[1]] then
-            local running = apt.task_map[args[1]]
-            apt.task_map[args[1]] = nil
-            local st,msg = coroutine.resume(running, table.unpack(args, 2, maxn(args)))
-            if not st then
-              print(msg)
-            end
-          end
-
-          obj.loadbalance:telldone(apt)
-        end
-      end
+      apt.max_job_count = max_job_count
 
       table.insert(obj.slaves, apt)
       obj.loadbalance:add(apt)
@@ -184,6 +181,45 @@ local function new(funcmap, slavecount, max_job_count, url)
           coroutine.resume(running, obj)
         end
       end
+
+      local last_expect = 1
+
+      while true do
+        local input = apt:receive(last_expect)
+        if not input then
+          break
+        end
+
+        local str,expect = input:GetString()
+        if str then
+          last_expect = 1
+          local args = objectbuf.decode(str)
+
+          if apt.task_map[args[1]] then
+            local running = apt.task_map[args[1]]
+            apt.task_map[args[1]] = nil
+            local st,msg = coroutine.resume(running, true, table.unpack(args, 2, maxn(args)))
+            if not st then
+              print(msg)
+            end
+          else
+            apt.task_map[args[1]] = {true, table.unpack(args, 2, maxn(args))}
+          end
+
+          obj.loadbalance:telldone(apt)
+        else
+          -- print(pid, "not enough, expect", expect)
+          last_expect = expect
+        end
+      end
+
+      for task_key,co in pairs(apt.task_map) do
+        if coroutine.status(co) == "suspended" then
+          apt.status = "dead"
+          assert(coroutine.resume(co, false, "slave dead."))
+        end
+      end
+
     end
 
     return obj
@@ -213,52 +249,61 @@ local function new(funcmap, slavecount, max_job_count, url)
     -- local f2 = fan.open("/dev/null")
 
     fan.loop(function()
-        while not cli do
-          fan.sleep(0.1)
-          cli = connector.connect(url)
-        end
-
-        local last_expect = 1
-
         while true do
-          local input = cli:receive(last_expect)
-          if not input then
-            break
+          while not cli do
+            fan.sleep(0.1)
+            cli = connector.connect(url)
           end
-          -- print(pid, "receive", input:available())
 
-          local str,expect = input:GetString()
-          if str then
-            last_expect = 1
-            -- print(pid, "onread slave", str)
+          local last_expect = 1
 
-            local args = objectbuf.decode(str)
-
-            local task_key = args[1]
-            local func = funcmap[args[2]]
-
-            -- print(pid, "process", task_key, args[2], table.unpack(args, 3, maxn(args)))
-
-            local ret = ""
-            if func then
-              local st,msg = pcall(function()
-                  local results = {task_key, func(table.unpack(args, 3, maxn(args))) }
-                  return objectbuf.encode(results)
-                end)
-              if not st then
-                print(msg)
-              else
-                ret = msg
-              end
+          while true do
+            local input = cli:receive(last_expect)
+            if not input then
+              break
             end
+            -- print(pid, "receive", input:available())
 
-            local output = stream.new()
-            output:AddString(ret)
-            cli:send(output:package())
-          else
-            -- print(pid, "not enough, expect", expect)
-            last_expect = expect
+            local str,expect = input:GetString()
+            if str then
+              last_expect = 1
+              -- print(pid, "onread slave", str)
+
+              local args = objectbuf.decode(str)
+
+              local task_key = args[1]
+              local func = funcmap[args[2]]
+
+              -- print(pid, "process", task_key, args[2], table.unpack(args, 3, maxn(args)))
+
+              local ret = ""
+              if func then
+                local st,msg = pcall(function()
+                    local results = {task_key, func(table.unpack(args, 3, maxn(args))) }
+                    return objectbuf.encode(results)
+                  end)
+                if not st then
+                  print(msg)
+                else
+                  ret = msg
+                end
+              end
+
+              local output = stream.new()
+              output:AddString(ret)
+              cli:send(output:package())
+            else
+              -- print(pid, "not enough, expect", expect)
+              last_expect = expect
+            end
           end
+
+          if cli then
+            cli:close()
+            cli = nil
+          end
+
+          fan.sleep(1)
         end
       end)
 

@@ -1,8 +1,8 @@
 package = "luafanlite"
-version = "0.4-1"
+version = "0.5-1"
 source = {
    url = "git://github.com/luafan/luafan",
-   tag = "v0.4"
+   tag = "v0.5"
 }
 
 description = {
@@ -44,6 +44,7 @@ build = {
             "src/tcpd.c",
             "src/udpd.c",
             "src/stream.c",
+            "src/objectbuf.c",
             "src/fifo.c",
             "src/http.c",
             "src/httpd.c",
@@ -59,7 +60,10 @@ build = {
       ["fan.connector.fifo"] = "modules/fan/connector/fifo.lua",
       ["fan.worker.init"] = "modules/fan/worker/init.lua",
       ["fan.pool"] = "modules/fan/pool.lua",
-      ["fan.objectbuf"] = "modules/fan/objectbuf.lua",
+      ["fan.stream.init"] = "modules/fan/stream/init.lua",
+      ["fan.stream.ffi"] = "modules/fan/stream/ffi.lua",
+      ["fan.stream.bit"] = "modules/fan/stream/bit.lua",
+      ["fan.objectbuf.init"] = "modules/fan/objectbuf/init.lua",
       ["fan.upnp"] = "modules/fan/upnp.lua",
       ["fan.utils"] = "modules/fan/utils.lua",
       ["config"] = "modules/config.lua",
