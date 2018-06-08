@@ -42,9 +42,17 @@ close this connection.
 
 send buf on background, using embedded private protocol to control squence, buf size limit around 65536 * (MTU payload len), support 33.75MB (65536 * (576 - 8 - 20 - 8)) over internet at least.
 
-* `cli.onread = function(buf) end` (udp with embedded private protocol)
+* `cli.onread = function(cli, buf) end` (udp with embedded private protocol)
 
 input buffer callback, using embedded private protocol to control squence, when all parts of the buffer received, this callback will be invoked.
+
+* `cli.onsent = function(cli, package) end` (udp with embedded private protocol)
+
+output buffer sent callback, when all parts of the buffer have been sent, this callback will be invoked.
+
+* `cli.ontimeout = function(cli, package) end` (udp with embedded private protocol)
+
+output buffer timeout callback, if callback return false, the package will be dropped, otherwise, the package will be resend.
 
 SERV
 ====
@@ -277,7 +285,7 @@ if fan.fork() > 0 then
       --     end
       -- end)()
 
-      cli.onread = function(body)
+      cli.onread = function(apt, body)
         count = count + 1
         -- print("cli onread", #(body))
         -- assert(body == longstr)
@@ -293,7 +301,7 @@ else
       serv = connector.bind("udp://127.0.0.1:10000")
       serv.onaccept = function(apt)
         print("onaccept")
-        apt.onread = function(body)
+        apt.onread = function(apt, body)
           -- print("apt onread", #(body))
           apt:send(body)
         end

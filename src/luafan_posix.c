@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sched.h>
 
 static int luafan_push_result(lua_State *L, int result)
 {
@@ -34,9 +35,14 @@ LUA_API int luafan_getpid(lua_State *L)
 
 LUA_API int luafan_getdtablesize(lua_State *L)
 {
+#ifndef __ANDROID__
   lua_pushinteger(L, getdtablesize());
+#else
+  lua_pushinteger(L, sysconf(_SC_OPEN_MAX));
+#endif
   return 1;
 }
+
 
 LUA_API int luafan_setpgid(lua_State *L)
 {
@@ -63,14 +69,23 @@ LUA_API int luafan_setsid(lua_State *L)
   return luafan_push_result(L, result);
 }
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
+#if TARGET_OS_IOS == 0
 extern char *__progname;
+#endif
+
 
 LUA_API int luafan_setprogname(lua_State *L)
 {
+#if TARGET_OS_IOS == 0
   size_t size = 0;
   const char *name = luaL_checklstring(L, 1, &size);
   memset(__progname, 0, 128);
   strncpy(__progname, name, 127 > size ? size : 127);
+#endif
 
   return 0;
 }
@@ -121,7 +136,6 @@ int sched_getaffinity(pid_t pid, size_t cpu_size, cpu_set_t *cpu_set)
   return 0;
 }
 #else
-#define __USE_GNU
 #include <sched.h>
 #endif
 
@@ -234,7 +248,11 @@ LUA_API int luafan_waitpid(lua_State *L)
   }
 }
 
+#ifdef __ANDROID__
+#include "ifaddrs.h"
+#else
 #include <ifaddrs.h>
+#endif
 
 LUA_API int luafan_getinterfaces(lua_State *L)
 {
@@ -253,13 +271,15 @@ LUA_API int luafan_getinterfaces(lua_State *L)
   for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
   {
     lua_newtable(L);
+    if (ifa->ifa_name) {
+        lua_pushstring(L, ifa->ifa_name);
+        lua_setfield(L, -2, "name");
+    }
     if (ifa->ifa_addr)
     {
       if (ifa->ifa_addr->sa_family == AF_INET ||
           ifa->ifa_addr->sa_family == AF_INET6)
       {
-        lua_pushstring(L, ifa->ifa_name);
-        lua_setfield(L, -2, "name");
         if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
                         NI_MAXHOST, NULL, 0, NI_NUMERICHOST) == 0)
         {

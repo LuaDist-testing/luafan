@@ -2,6 +2,12 @@
 #ifndef utlua_h
 #define utlua_h
 
+#ifndef TARGET_OS_IPHONE
+#if defined(__IPHONE_OS_VERSION_MAX_ALLOWED)
+#define TARGET_OS_IPHONE            1
+#endif
+#endif
+
 // #define FAN_HAS_OPENSSL 1
 // #define FAN_HAS_LUAJIT  1
 
@@ -29,9 +35,15 @@
 #include <stdbool.h>
 #endif
 
+#if TARGET_OS_IPHONE
+#include <lua53/lauxlib.h>
+#include <lua53/lua.h>
+#include <lua53/lualib.h>
+#else
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+#endif
 
 #include <event.h>
 #include <event2/bufferevent.h>
@@ -60,7 +72,7 @@
 #ifdef __ANDROID__
 
 #include <android/log.h>
-#define LOG_TAG "luafan.log"
+#define LOG_TAG "lua.print"
 #undef LOG
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -112,8 +124,13 @@
 #define lua_unlock(L) ((void)0)
 #endif
 
-int utlua_resume(lua_State *co, lua_State *from, int count);
 lua_State *utlua_mainthread(lua_State *L);
+
+typedef int(*FAN_RESUME_TPYE)(lua_State *co, lua_State *from, int count);
+
+void utlua_set_resume(FAN_RESUME_TPYE resume);
+
+extern FAN_RESUME_TPYE FAN_RESUME;
 
 #define PUSH_REF(L)                                 \
         lua_lock(L);                                \

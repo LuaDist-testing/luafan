@@ -24,7 +24,7 @@ static void main_handler(const int fd, const short which, void *arg)
   lua_unlock(mainState);
 
   lua_rawgeti(co, LUA_REGISTRYINDEX, main_ref);
-  utlua_resume(co, NULL, 0);
+  FAN_RESUME(co, NULL, 0);
 
   luaL_unref(co, LUA_REGISTRYINDEX, main_ref);
   main_ref = LUA_NOREF;
@@ -85,7 +85,7 @@ static void clock_handler(const int fd, const short which, void *arg)
   lua_pop(L, 1);
   lua_unlock(L);
 
-  utlua_resume(co, NULL, 0);
+  FAN_RESUME(co, NULL, 0);
 
   luaL_unref(L, LUA_REGISTRYINDEX, threadRef);
 }
@@ -198,12 +198,14 @@ LUA_API int luafan_close(lua_State *L);
 LUA_API int luafan_setsid(lua_State *L);
 LUA_API int luafan_setprogname(lua_State *L);
 LUA_API int luafan_getpgid(lua_State *L);
+
 LUA_API int luafan_getaffinity(lua_State *L);
 LUA_API int luafan_setaffinity(lua_State *L);
 LUA_API int luafan_getcpucount(lua_State *L);
+LUA_API int luafan_getinterfaces(lua_State *L);
+
 LUA_API int luafan_kill(lua_State *L);
 LUA_API int luafan_waitpid(lua_State *L);
-LUA_API int luafan_getinterfaces(lua_State *L);
 
 LUA_API int luafan_gettop(lua_State *L)
 {

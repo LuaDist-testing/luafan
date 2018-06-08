@@ -66,6 +66,8 @@ typedef struct
   char *host;
   int port;
 
+  int ipv6;
+  
 #if FAN_HAS_OPENSSL
   int ssl;
   SSL_CTX *ctx;
@@ -205,7 +207,7 @@ static void tcpd_accept_eventcb(struct bufferevent *bev, short events,
 
       CLEAR_REF(mainthread, accept->onDisconnectedRef)
 
-      utlua_resume(co, mainthread, 1);
+      FAN_RESUME(co, mainthread, 1);
       POP_REF(mainthread);
     }
 
@@ -243,7 +245,7 @@ static void tcpd_accept_readcb(struct bufferevent *bev, void *ctx)
 
     lua_rawgeti(co, LUA_REGISTRYINDEX, accept->onReadRef);
     lua_pushlstring(co, (const char *)ba.buffer, ba.total);
-    utlua_resume(co, mainthread, 1);
+    FAN_RESUME(co, mainthread, 1);
     POP_REF(mainthread);
   }
 
@@ -265,7 +267,7 @@ static void tcpd_accept_writecb(struct bufferevent *bev, void *ctx)
       lua_unlock(mainthread);
 
       lua_rawgeti(co, LUA_REGISTRYINDEX, accept->onSendReadyRef);
-      utlua_resume(co, mainthread, 0);
+      FAN_RESUME(co, mainthread, 0);
       POP_REF(mainthread);
     }
   }
@@ -293,6 +295,7 @@ void connlistener_cb(struct evconnlistener *listener, evutil_socket_t fd,
     accept->selfRef = LUA_NOREF;
     accept->onReadRef = LUA_NOREF;
     accept->onSendReadyRef = LUA_NOREF;
+    accept->onDisconnectedRef = LUA_NOREF;
 
     luaL_getmetatable(co, LUA_TCPD_ACCEPT_TYPE);
     lua_setmetatable(co, -2);
@@ -311,8 +314,7 @@ void connlistener_cb(struct evconnlistener *listener, evutil_socket_t fd,
     else
     {
 #endif
-      bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE |
-                                                 BEV_OPT_DEFER_CALLBACKS);
+      bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
 #if FAN_HAS_OPENSSL
     }
 #endif
@@ -350,7 +352,7 @@ void connlistener_cb(struct evconnlistener *listener, evutil_socket_t fd,
 
     accept->buf = bev;
 
-    utlua_resume(co, mainthread, 1);
+    FAN_RESUME(co, mainthread, 1);
     POP_REF(mainthread);
   }
 }
@@ -394,7 +396,7 @@ static int ssl_servername_cb(SSL *s, int *ad, void *arg)
 
     lua_rawgeti(co, LUA_REGISTRYINDEX, serv->onSSLHostNameRef);
     lua_pushstring(co, hostname);
-    utlua_resume(co, mainthread, 1);
+    FAN_RESUME(co, mainthread, 1);
     POP_REF(mainthread);
   }
   // if (!p->servername)
@@ -408,6 +410,77 @@ static int ssl_servername_cb(SSL *s, int *ad, void *arg)
 }
 
 #endif
+
+static void tcpd_server_rebind(lua_State *L, SERVER *serv)
+{
+  if (serv->listener) {
+    evconnlistener_free(serv->listener);
+    serv->listener = NULL;
+  }
+  if (serv->host)
+  {
+    char portbuf[6];
+    evutil_snprintf(portbuf, sizeof(portbuf), "%d", serv->port);
+
+    struct evutil_addrinfo hints = {0};
+    struct evutil_addrinfo *answer = NULL;
+    hints.ai_family = serv->ipv6 ? AF_INET6 : AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+    hints.ai_flags = EVUTIL_AI_ADDRCONFIG;
+    int err = evutil_getaddrinfo(serv->host, portbuf, &hints, &answer);
+    if (err < 0 || !answer)
+    {
+      luaL_error(L, "invaild bind address %s:%d", serv->host, serv->port);
+    }
+
+    serv->listener =
+        evconnlistener_new_bind(event_mgr_base(), connlistener_cb, serv,
+                                LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
+                                answer->ai_addr, answer->ai_addrlen);
+    evutil_freeaddrinfo(answer);
+  }
+  else
+  {
+    struct sockaddr *addr = NULL;
+    size_t addr_size = 0;
+    struct sockaddr_in sin;
+    struct sockaddr_in6 sin6;
+
+    memset(&sin, 0, sizeof(sin));
+    memset(&sin6, 0, sizeof(sin6));
+
+    if (!serv->ipv6)
+    {
+      addr = (struct sockaddr *)&sin;
+      addr_size = sizeof(sin);
+
+      sin.sin_family = AF_INET;
+      sin.sin_addr.s_addr = htonl(0);
+      sin.sin_port = htons(serv->port);
+    }
+    else
+    {
+      addr = (struct sockaddr *)&sin6;
+      addr_size = sizeof(sin6);
+
+      sin6.sin6_family = AF_INET6;
+      // sin6.sin6_addr.s6_addr
+      sin6.sin6_port = htons(serv->port);
+    }
+
+    serv->listener = evconnlistener_new_bind(
+        event_mgr_base(), connlistener_cb, serv,
+        LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1, addr, addr_size);
+  }
+}
+
+LUA_API int lua_tcpd_server_rebind(lua_State *L)
+{
+  SERVER *serv = luaL_checkudata(L, 1, LUA_TCPD_SERVER_TYPE);
+  tcpd_server_rebind(L, serv);
+  return 0;
+}
 
 LUA_API int tcpd_bind(lua_State *L)
 {
@@ -424,11 +497,12 @@ LUA_API int tcpd_bind(lua_State *L)
   DUP_STR_FROM_TABLE(L, serv->host, 1, "host")
   SET_INT_FROM_TABLE(L, serv->port, 1, "port")
 
-#if FAN_HAS_OPENSSL
-
   lua_getfield(L, 1, "ssl");
-  serv->ssl = lua_toboolean(L, -1);
+  int ssl = lua_toboolean(L, -1);
   lua_pop(L, 1);
+
+#if FAN_HAS_OPENSSL
+  serv->ssl = ssl;
 
   if (serv->ssl)
   {
@@ -463,6 +537,10 @@ LUA_API int tcpd_bind(lua_State *L)
 
     lua_pop(L, 2);
   }
+#else
+  if (ssl) {
+    luaL_error(L, "ssl is not supported on micro version.");
+  }
 #endif
 
   SET_INT_FROM_TABLE(L, serv->send_buffer_size, 1, "send_buffer_size")
@@ -474,65 +552,10 @@ LUA_API int tcpd_bind(lua_State *L)
   serv->mainthread = utlua_mainthread(L);
 
   lua_getfield(L, 1, "ipv6");
-  int ipv6 = lua_toboolean(L, -1);
+  serv->ipv6 = lua_toboolean(L, -1);
   lua_pop(L, 1);
 
-  if (serv->host)
-  {
-    char portbuf[6];
-    evutil_snprintf(portbuf, sizeof(portbuf), "%d", serv->port);
-
-    struct evutil_addrinfo hints = {0};
-    struct evutil_addrinfo *answer = NULL;
-    hints.ai_family = ipv6 ? AF_INET6 : AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_protocol = IPPROTO_UDP;
-    hints.ai_flags = EVUTIL_AI_ADDRCONFIG;
-    int err = evutil_getaddrinfo(serv->host, portbuf, &hints, &answer);
-    if (err < 0 || !answer)
-    {
-      luaL_error(L, "invaild bind address %s:%d", serv->host, serv->port);
-    }
-
-    serv->listener =
-        evconnlistener_new_bind(event_mgr_base(), connlistener_cb, serv,
-                                LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1,
-                                answer->ai_addr, answer->ai_addrlen);
-    evutil_freeaddrinfo(answer);
-  }
-  else
-  {
-    struct sockaddr *addr = NULL;
-    size_t addr_size = 0;
-    struct sockaddr_in sin;
-    struct sockaddr_in6 sin6;
-
-    memset(&sin, 0, sizeof(sin));
-    memset(&sin6, 0, sizeof(sin6));
-
-    if (!ipv6)
-    {
-      addr = (struct sockaddr *)&sin;
-      addr_size = sizeof(sin);
-
-      sin.sin_family = AF_INET;
-      sin.sin_addr.s_addr = htonl(0);
-      sin.sin_port = htons(serv->port);
-    }
-    else
-    {
-      addr = (struct sockaddr *)&sin6;
-      addr_size = sizeof(sin6);
-
-      sin6.sin6_family = AF_INET6;
-      // sin6.sin6_addr.s6_addr
-      sin6.sin6_port = htons(serv->port);
-    }
-
-    serv->listener = evconnlistener_new_bind(
-        event_mgr_base(), connlistener_cb, serv,
-        LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, -1, addr, addr_size);
-  }
+  tcpd_server_rebind(L, serv);
 
   if (!serv->listener)
   {
@@ -540,8 +563,12 @@ LUA_API int tcpd_bind(lua_State *L)
   }
   else
   {
-    lua_pushinteger(
-        L, regress_get_socket_port(evconnlistener_get_fd(serv->listener)));
+    if (!serv->port)
+    {
+      serv->port = regress_get_socket_port(evconnlistener_get_fd(serv->listener));
+    }
+
+    lua_pushinteger(L, serv->port);
     return 2;
   }
 }
@@ -571,7 +598,7 @@ static void tcpd_conn_readcb(struct bufferevent *bev, void *ctx)
 
     lua_rawgeti(co, LUA_REGISTRYINDEX, conn->onReadRef);
     lua_pushlstring(co, (const char *)ba.buffer, ba.total);
-    utlua_resume(co, mainthread, 1);
+    FAN_RESUME(co, mainthread, 1);
     POP_REF(mainthread);
   }
 
@@ -593,7 +620,7 @@ static void tcpd_conn_writecb(struct bufferevent *bev, void *ctx)
       lua_unlock(mainthread);
 
       lua_rawgeti(co, LUA_REGISTRYINDEX, conn->onSendReadyRef);
-      utlua_resume(co, mainthread, 0);
+      FAN_RESUME(co, mainthread, 0);
       POP_REF(mainthread);
     }
   }
@@ -617,7 +644,7 @@ static void tcpd_conn_eventcb(struct bufferevent *bev, short events,
       lua_unlock(mainthread);
 
       lua_rawgeti(co, LUA_REGISTRYINDEX, conn->onConnectedRef);
-      utlua_resume(co, mainthread, 0);
+      FAN_RESUME(co, mainthread, 0);
       POP_REF(mainthread);
     }
   }
@@ -696,7 +723,7 @@ static void tcpd_conn_eventcb(struct bufferevent *bev, short events,
       {
         lua_pushnil(co);
       }
-      utlua_resume(co, mainthread, 1);
+      FAN_RESUME(co, mainthread, 1);
       POP_REF(mainthread);
     }
   }
@@ -873,6 +900,10 @@ LUA_API int tcpd_connect(lua_State *L)
   DUP_STR_FROM_TABLE(L, conn->host, 1, "host")
   SET_INT_FROM_TABLE(L, conn->port, 1, "port")
 
+  lua_getfield(L, 1, "ssl");
+  int ssl = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+
 #if FAN_HAS_OPENSSL
   lua_getfield(L, 1, "ssl_verifyhost");
   conn->ssl_verifyhost = (int)luaL_optinteger(L, -1, 1);
@@ -884,10 +915,6 @@ LUA_API int tcpd_connect(lua_State *L)
 
   DUP_STR_FROM_TABLE(L, conn->ssl_host, 1, "ssl_host")
 
-  lua_getfield(L, 1, "ssl");
-  int ssl = lua_toboolean(L, -1);
-  lua_pop(L, 1);
-
   lua_getfield(L, 1, "ipv6");
   conn->ipv6 = lua_toboolean(L, -1);
   lua_pop(L, 1);
@@ -896,7 +923,8 @@ LUA_API int tcpd_connect(lua_State *L)
   {
     lua_getfield(L, 1, "cainfo");
     const char *cainfo = luaL_optstring(L, -1, NULL);
-    if (!cainfo) {
+    if (!cainfo)
+    {
       luaL_error(L, "expect cainfo on ssl connection.");
     }
     lua_pop(L, 1);
@@ -1018,6 +1046,10 @@ LUA_API int tcpd_connect(lua_State *L)
 
     bytearray_dealloc(&ba);
   }
+#else
+  if (ssl) {
+    luaL_error(L, "ssl is not supported on micro version.");
+  }
 #endif
 
   SET_INT_FROM_TABLE(L, conn->send_buffer_size, 1, "send_buffer_size")
@@ -1116,14 +1148,14 @@ LUA_API int tcpd_accept_original_dst(lua_State *L)
   if (ss.ss_family == AF_INET)
   {
     struct sockaddr_in *addr_in = (struct sockaddr_in *)&ss;
-    ntohs(((struct sockaddr_in *)&ss)->sin_port);
+    port = ntohs(((struct sockaddr_in *)&ss)->sin_port);
     inet_ntop(addr_in->sin_family, (void *)&(addr_in->sin_addr), host,
               INET_ADDRSTRLEN);
   }
   else if (ss.ss_family == AF_INET6)
   {
     struct sockaddr_in6 *addr_in = (struct sockaddr_in6 *)&ss;
-    ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
+    port = ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
     inet_ntop(addr_in->sin6_family, (void *)&(addr_in->sin6_addr), host,
               INET6_ADDRSTRLEN);
   }
@@ -1132,13 +1164,44 @@ LUA_API int tcpd_accept_original_dst(lua_State *L)
   lua_pushinteger(L, port);
   return 2;
 }
-#else
-LUA_API int tcpd_accept_original_dst(lua_State *L)
-{
-  luaL_error(L, "not support.");
-  return 0;
-}
+
 #endif
+
+LUA_API int tcpd_accept_getsockname(lua_State *L)
+{
+  ACCEPT *accept = luaL_checkudata(L, 1, LUA_TCPD_ACCEPT_TYPE);
+  evutil_socket_t fd = bufferevent_getfd(accept->buf);
+
+  struct sockaddr_storage ss;
+  socklen_t len = sizeof(struct sockaddr_storage);
+  if (getsockname(fd, (struct sockaddr*)&ss, &len))
+  {
+    lua_pushnil(L);
+    lua_pushfstring(L, "getsockname: %s", strerror(errno));
+    return 2;
+  }
+
+  char host[INET6_ADDRSTRLEN];
+  int port = 0;
+  if (ss.ss_family == AF_INET)
+  {
+    struct sockaddr_in *addr_in = (struct sockaddr_in *)&ss;
+    port = ntohs(((struct sockaddr_in *)&ss)->sin_port);
+    inet_ntop(addr_in->sin_family, (void *)&(addr_in->sin_addr), host,
+              INET_ADDRSTRLEN);
+  }
+  else if (ss.ss_family == AF_INET6)
+  {
+    struct sockaddr_in6 *addr_in = (struct sockaddr_in6 *)&ss;
+    port = ntohs(((struct sockaddr_in6 *)&ss)->sin6_port);
+    inet_ntop(addr_in->sin6_family, (void *)&(addr_in->sin6_addr), host,
+              INET6_ADDRSTRLEN);
+  }
+
+  lua_pushstring(L, host);
+  lua_pushinteger(L, port);
+  return 2;
+}
 
 LUA_API int tcpd_accept_close(lua_State *L)
 {
@@ -1308,8 +1371,13 @@ LUA_API int luaopen_fan_tcpd(lua_State *L)
   lua_pushcfunction(L, &tcpd_accept_remote);
   lua_setfield(L, -2, "remoteinfo");
 
+  lua_pushcfunction(L, &tcpd_accept_getsockname);
+  lua_setfield(L, -2, "getsockname");
+
+#ifdef __linux__
   lua_pushcfunction(L, &tcpd_accept_original_dst);
   lua_setfield(L, -2, "original_dst");
+#endif
 
   lua_pushstring(L, "__index");
   lua_pushvalue(L, -2);
@@ -1329,6 +1397,9 @@ LUA_API int luaopen_fan_tcpd(lua_State *L)
   lua_pushstring(L, "close");
   lua_pushcfunction(L, &lua_tcpd_server_close);
   lua_rawset(L, -3);
+
+  lua_pushcfunction(L, &lua_tcpd_server_rebind);
+  lua_setfield(L, -2, "rebind");
 
   lua_pushstring(L, "__gc");
   lua_pushcfunction(L, &lua_tcpd_server_gc);

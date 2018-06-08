@@ -20,7 +20,7 @@ local function request(method, check_body, args)
             port = 80
         end
     end
-    
+
     if schema == "https" then
         args.ssl = true
         if not args.cainfo then
@@ -28,43 +28,48 @@ local function request(method, check_body, args)
         end
     end
 
+    if not args.headers then
+        args.headers = {}
+    end
+
     if not args.headers["Host"] then
         args.headers["Host"] = host
     end
 
-    print(host, port)
-    
     if #path == 0 then
         path = "/"
     end
-    
+
     local headers = {}
     local ret = {responseCode = 0, headers = headers}
-    
+
     local version
     local code
     local message
-    
+
     local first_line_completed = false
     local header_complete = false
     local accepted = false
     local disconnected = false
-    
+
     local content_length = 0
     local chunked = false
-    
+
     local conn
     local conn_connected = false
-    
+
     conn = connector.connect(string.format("tcp://%s:%d", host, port), args)
-    
+
     local t = {string.format("%s %s HTTP/1.0\r\n", method:upper(), path)}
     if not args.headers or type(args.headers) ~= "table" then
         args.headers = {}
     end
-    
+
     if check_body then
-        if args.onbodylength and type(args.onbodylength) == "function" and args.onbody and type(args.onbody) == "function" then
+        if
+            args.onbodylength and type(args.onbodylength) == "function" and args.onbody and
+                type(args.onbody) == "function"
+         then
             args.headers["Content-Length"] = args:onbodylength()
         else
             if args.body and type(args.body) == "string" then
@@ -75,15 +80,13 @@ local function request(method, check_body, args)
             end
         end
     end
-    if args.headers then
-        for k, v in pairs(args.headers) do
-            table.insert(t, string.format("%s: %s\r\n", k, v))
-        end
+    for k, v in pairs(args.headers) do
+        table.insert(t, string.format("%s: %s\r\n", k, v))
     end
     table.insert(t, "\r\n")
-    
+
     conn:send(table.concat(t))
-    
+
     if check_body then
         if args.onbody then
             args:onbody(conn)
@@ -91,7 +94,7 @@ local function request(method, check_body, args)
             conn:send(args.body)
         end
     end
-    
+
     local input
     while not header_complete do
         input = conn:receive()
@@ -136,7 +139,7 @@ local function request(method, check_body, args)
                     else
                         version, code, message = string.match(line, "HTTP/([0-9.]+) (%d+) (.+)")
                         first_line_completed = true
-                        ret.responseCode = code
+                        ret.responseCode = tonumber(code)
                         ret.responseMessage = message
                     end
                 end
@@ -145,11 +148,11 @@ local function request(method, check_body, args)
             break
         end
     end
-    
+
     if header_complete then
         local t = {}
         local count = 0
-        
+
         if chunked then
             local line_total = 0
             repeat
@@ -183,12 +186,12 @@ local function request(method, check_body, args)
                             else
                                 ret.error = conn.disconnected_message
                             end
-                            
+
                             break
                         end
                     end
                 end
-                
+
                 input = conn:receive()
                 if not input then
                     ret.error = "chunked error 3."
@@ -201,10 +204,10 @@ local function request(method, check_body, args)
                     table.insert(t, buff)
                     count = count + #buff
                 end
-                
+
                 input = conn:receive()
             until count >= content_length or not input
-            
+
             if count == content_length then
                 ret.body = table.concat(t)
             else
@@ -214,22 +217,79 @@ local function request(method, check_body, args)
     else
         ret.error = conn.disconnected_message
     end
-    
+
     conn:close()
-    
+
     return ret
 end
 
-return {get = function(args)
+local byte_white_map = {}
+for i = string.byte("A"), string.byte("Z") do
+    byte_white_map[i] = string.char(i)
+end
+for i = string.byte("a"), string.byte("z") do
+    byte_white_map[i] = string.char(i)
+end
+for i = string.byte("0"), string.byte("9") do
+    byte_white_map[i] = string.char(i)
+end
+
+byte_white_map[string.byte("_")] = "_"
+byte_white_map[string.byte("-")] = "-"
+byte_white_map[string.byte("~")] = "~"
+byte_white_map[string.byte(".")] = "."
+byte_white_map[string.byte("/")] = "/"
+
+local byte_white_map_slash = {}
+for k, v in pairs(byte_white_map) do
+    byte_white_map_slash[k] = v
+end
+
+byte_white_map_slash[string.byte("/")] = "%2F"
+
+local function escape(value, encode_slash)
+    value = tostring(value)
+
+    local tb = {}
+    local map = encode_slash and byte_white_map_slash or byte_white_map
+    for i = 1, #(value) do
+        local ch = string.byte(value, i)
+        table.insert(tb, map[ch] or string.format("%%%X", ch))
+    end
+
+    return table.concat(tb)
+end
+
+local function unescape(value)
+    return value and
+        string.gsub(
+            value,
+            "%%(%x%x)",
+            function(hex)
+                return string.char(tonumber(hex, 16))
+            end
+        )
+end
+
+return {
+    get = function(args)
         return request("GET", false, args)
-    end, post = function(args)
+    end,
+    post = function(args)
         return request("POST", true, args)
-    end, put = function(args)
+    end,
+    put = function(args)
         return request("PUT", true, args)
-    end, head = function(args)
+    end,
+    head = function(args)
         return request("HEAD", false, args)
-    end, update = function(args)
+    end,
+    update = function(args)
         return request("UPDATE", false, args)
-    end, delete = function(args)
+    end,
+    delete = function(args)
         return request("DELETE", false, args)
-    end}
+    end,
+    escape = escape,
+    unescape = unescape
+}
