@@ -1,16 +1,16 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "luafan"
-version = "0.5-1"
+version = "0.6-1"
 -- LuaDist source
 source = {
-  tag = "0.5-1",
+  tag = "0.6-1",
   url = "git://github.com/LuaDist-testing/luafan.git"
 }
 -- Original source
 -- source = {
 --    url = "git://github.com/luafan/luafan",
---    tag = "v0.5"
+--    tag = "v0.6"
 -- }
 
 description = {
@@ -76,6 +76,8 @@ build = {
       ["fan.stream.init"] = "modules/fan/stream/init.lua",
       ["fan.stream.ffi"] = "modules/fan/stream/ffi.lua",
       ["fan.stream.bit"] = "modules/fan/stream/bit.lua",
+      ["fan.httpd.init"] = "modules/fan/httpd/init.lua",
+      ["fan.httpd.httpd"] = "modules/fan/httpd/httpd.lua",
       ["fan.objectbuf.init"] = "modules/fan/objectbuf/init.lua",
       ["fan.upnp"] = "modules/fan/upnp.lua",
       ["fan.utils"] = "modules/fan/utils.lua",
